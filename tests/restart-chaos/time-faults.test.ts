@@ -83,20 +83,27 @@ describe("process freezing", () => {
 });
 
 describe("aging", () => {
-  it("shifts every timestamp column of a table in one statement", () => {
+  const window = { lo: 1_000, hi: 2_000 };
+
+  it("shifts every timestamp and JSON column of a table in one statement", () => {
     const statements = agingStatements([
-      { table: "heartbeat_runs", column: "created_at" }, { table: "heartbeat_runs", column: "controller_lease_expires_at" },
-      { table: "agents", column: "updated_at" },
-    ], 2 * HOUR);
+      { table: "heartbeat_runs", column: "created_at", kind: "timestamp" },
+      { table: "heartbeat_runs", column: "context_snapshot", kind: "json" },
+      { table: "agents", column: "updated_at", kind: "timestamp" },
+    ], 2 * HOUR, window);
     expect(statements.map(statement => statement.table)).toEqual(["agents", "heartbeat_runs"]);
     expect(statements[1]!.sql).toBe("update public.\"heartbeat_runs\" set \"created_at\" = \"created_at\" - interval '7200000 milliseconds', "
-      + "\"controller_lease_expires_at\" = \"controller_lease_expires_at\" - interval '7200000 milliseconds' "
-      + "where \"created_at\" is not null or \"controller_lease_expires_at\" is not null");
-    expect(() => agingStatements([], 0)).toThrow(/positive/);
+      + "\"context_snapshot\" = pg_temp.paperclip_shift_json(\"context_snapshot\", 7200000, 1000, 2000) "
+      + "where \"created_at\" is not null or \"context_snapshot\" is not null");
+  });
+
+  it("takes whole seconds only, so fractional digits never change", () => {
+    expect(() => agingStatements([], 0, window)).toThrow(/positive/);
+    expect(() => agingStatements([], 1_500, window)).toThrow(/whole number of seconds/);
   });
 
   it("quotes identifiers", () => {
-    expect(agingStatements([{ table: "we\"ird", column: "at" }], 1)[0]!.sql).toContain("public.\"we\"\"ird\"");
+    expect(agingStatements([{ table: "we\"ird", column: "at", kind: "timestamp" }], 1_000, window)[0]!.sql).toContain("public.\"we\"\"ird\"");
   });
 });
 

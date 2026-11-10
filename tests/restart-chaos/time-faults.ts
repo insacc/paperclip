@@ -166,16 +166,62 @@ export function databaseUrlFromConfig(configPath: string): string {
 
 const quote = (identifier: string) => `"${identifier.replace(/"/g, "\"\"")}"`;
 
-/** One UPDATE per table, shifting all of its timestamp columns at once. */
-export function agingStatements(columns: ReadonlyArray<{ table: string; column: string }>, ageMs: number): Array<{ table: string; columns: string[]; sql: string }> {
-  if (!Number.isSafeInteger(ageMs) || ageMs <= 0) throw new Error("Aging needs a positive whole number of milliseconds");
-  const byTable = new Map<string, string[]>();
-  for (const { table, column } of columns) byTable.set(table, [...(byTable.get(table) ?? []), column]);
-  return [...byTable.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([table, cols]) => ({
-    table, columns: cols,
-    sql: `update public.${quote(table)} set ${cols.map(col => `${quote(col)} = ${quote(col)} - interval '${ageMs} milliseconds'`).join(", ")}`
-      + ` where ${cols.map(col => `${quote(col)} is not null`).join(" or ")}`,
-  }));
+export type AgingColumn = { table: string; column: string; kind: "timestamp" | "json" };
+
+/**
+ * A session function (pg_temp) that shifts every time inside a JSON value, so a
+ * copy of a time (a snapshot, a receipt, an event payload) still equals the
+ * column it was copied from:
+ * - an ISO datetime string keeps its exact format, separator and offset;
+ * - a whole number in the epoch-millisecond window [lo, hi] (the wave's own times) moves by the age.
+ * The age is whole seconds, so fractional digits never change.
+ */
+export const SHIFT_JSON_FUNCTION = [
+  "create or replace function pg_temp.paperclip_shift_json(v jsonb, age_ms bigint, lo bigint, hi bigint)",
+  "returns jsonb language plpgsql immutable as $fn$",
+  "declare t text; m text[]; r jsonb; shifted timestamp;",
+  "begin",
+  "  case jsonb_typeof(v)",
+  "  when 'object' then",
+  "    select coalesce(jsonb_object_agg(e.key, pg_temp.paperclip_shift_json(e.value, age_ms, lo, hi)), '{}'::jsonb) into r from jsonb_each(v) e;",
+  "    return r;",
+  "  when 'array' then",
+  "    select coalesce(jsonb_agg(pg_temp.paperclip_shift_json(e.value, age_ms, lo, hi) order by e.ord), '[]'::jsonb) into r",
+  "      from jsonb_array_elements(v) with ordinality e(value, ord);",
+  "    return r;",
+  "  when 'string' then",
+  "    t := v #>> '{}';",
+  "    m := regexp_match(t, '^([0-9]{4}-[0-9]{2}-[0-9]{2})([T ])([0-9]{2}:[0-9]{2}:[0-9]{2})([.][0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)?$');",
+  "    if m is null then return v; end if;",
+  "    begin",
+  "      shifted := (m[1] || ' ' || m[3])::timestamp - make_interval(secs => age_ms / 1000);",
+  "    exception when others then return v;",
+  "    end;",
+  "    return to_jsonb(to_char(shifted, 'YYYY-MM-DD') || m[2] || to_char(shifted, 'HH24:MI:SS') || coalesce(m[4], '') || coalesce(m[5], ''));",
+  "  when 'number' then",
+  "    t := v #>> '{}';",
+  "    if t ~ '^[0-9]{12,14}$' and t::numeric between lo and hi then return to_jsonb(t::bigint - age_ms); end if;",
+  "    return v;",
+  "  else",
+  "    return v;",
+  "  end case;",
+  "end $fn$",
+].join("\n");
+
+/** One UPDATE per table, shifting all of its timestamp and JSON columns at once. */
+export function agingStatements(columns: ReadonlyArray<AgingColumn>, ageMs: number,
+  epochWindow: { lo: number; hi: number }): Array<{ table: string; columns: string[]; sql: string }> {
+  if (!Number.isSafeInteger(ageMs) || ageMs <= 0 || ageMs % 1000 !== 0) throw new Error("Aging needs a positive whole number of seconds");
+  const byTable = new Map<string, AgingColumn[]>();
+  for (const column of columns) byTable.set(column.table, [...(byTable.get(column.table) ?? []), column]);
+  const shift = (column: AgingColumn) => column.kind === "timestamp"
+    ? `${quote(column.column)} - interval '${ageMs} milliseconds'`
+    : `pg_temp.paperclip_shift_json(${quote(column.column)}, ${ageMs}, ${Math.trunc(epochWindow.lo)}, ${Math.trunc(epochWindow.hi)})`;
+  return [...byTable.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([table, cols]) => {
+    const present = cols.map(col => `${quote(col.column)} is not null`).join(" or ");
+    return { table, columns: cols.map(col => col.column),
+      sql: `update public.${quote(table)} set ${cols.map(col => `${quote(col.column)} = ${shift(col)}`).join(", ")} where ${present}` };
+  });
 }
 
 const LOCK_NOT_AVAILABLE = "55P03";
@@ -198,10 +244,14 @@ export async function ageWaveDatabase(input: { connectionString: string; faultId
   const db = createDb(input.connectionString);
   const sql = db.$client;
   try {
-    const columns = await sql.unsafe(`select table_name as "table", column_name as "column" from information_schema.columns
-      where table_schema = 'public' and data_type in ('timestamp with time zone', 'timestamp without time zone')
-      order by table_name, ordinal_position`) as unknown as Array<{ table: string; column: string }>;
-    const statements = agingStatements(columns, input.ageMs);
+    const columns = await sql.unsafe(`select c.table_name as "table", c.column_name as "column",
+        case when c.data_type = 'jsonb' then 'json' else 'timestamp' end as kind
+      from information_schema.columns c join information_schema.tables t
+        on t.table_schema = c.table_schema and t.table_name = c.table_name and t.table_type = 'BASE TABLE'
+      where c.table_schema = 'public' and c.data_type in ('timestamp with time zone', 'timestamp without time zone', 'jsonb')
+      order by c.table_name, c.ordinal_position`) as unknown as AgingColumn[];
+    // Epoch milliseconds the wave itself could have written: from a day before it started to a week ahead.
+    const statements = agingStatements(columns, input.ageMs, { lo: input.waveStartedAt - 86_400_000, hi: startedAt + 7 * 86_400_000 });
     const identityColumns = await sql.unsafe(`select table_name as "table", column_name as "column" from information_schema.columns
       where table_schema = 'public' and table_name = any($1) and column_name in ('id', 'boot_id', 'run_id', 'issue_id', 'status', 'phase', 'state')
       order by table_name, ordinal_position`, [[...TIME_BOUND_TABLES]]) as unknown as Array<{ table: string; column: string }>;
@@ -214,13 +264,15 @@ export async function ageWaveDatabase(input: { connectionString: string; faultId
         const outcome = await sql.begin(async tx => {
           await tx.unsafe("set local lock_timeout = '3s'");
           if (triggersDisabled) await tx.unsafe("set local session_replication_role = replica");
+          await tx.unsafe(SHIFT_JSON_FUNCTION);
           const before: Record<string, unknown[]> = {};
           for (const statement of statements) {
             if (!recorded.has(statement.table)) continue;
             // Identity, state and times only: payload columns can carry run output.
             const keys = identityColumns.filter(key => key.table === statement.table).map(key => key.column);
-            const select = [...keys, ...statement.columns].map(quote).join(", ");
-            const order = statement.columns.includes("created_at") ? " order by created_at desc" : "";
+            const times = columns.filter(column => column.table === statement.table && column.kind === "timestamp").map(column => column.column);
+            const select = [...keys, ...times].map(quote).join(", ");
+            const order = times.includes("created_at") ? " order by created_at desc" : "";
             before[statement.table] = await tx.unsafe(`select ${select} from public.${quote(statement.table)}${order} limit ${RECORDED_ROWS_PER_TABLE}`) as unknown as unknown[];
           }
           const tables: AgedTable[] = [];
