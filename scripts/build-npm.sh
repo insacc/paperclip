@@ -33,6 +33,16 @@ else
   echo "  [1/5] Skipping forbidden token check (--skip-checks)"
 fi
 
+# ── Step 1b: Stage bundled skills into publishable packages ───────────────────
+# release.sh copies the repository skills into these packages before packing;
+# git installs (`paperclipai install --ref`) call this script instead and then
+# pack the packages directly, so stage the same directories here. Idempotent.
+echo "  [1b] Staging bundled skills into publishable packages..."
+for pkg_dir in server packages/adapters/claude-local packages/adapters/codex-local; do
+  rm -rf "$REPO_ROOT/$pkg_dir/skills"
+  cp -r "$REPO_ROOT/skills" "$REPO_ROOT/$pkg_dir/skills"
+done
+
 # ── Step 2: TypeScript type-check ──────────────────────────────────────────────
 if [ "$skip_typecheck" = false ]; then
   echo "  [2/6] Type-checking..."

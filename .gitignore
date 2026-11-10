@@ -6,6 +6,9 @@ dist/
 dist-preview/
 dist-flow-preview/
 server/ui-dist/
+server/skills/
+packages/adapters/claude-local/skills/
+packages/adapters/codex-local/skills/
 server/dist-runtime/
 packages/paperclip-runner/runner/target/
 ui/storybook-static/
