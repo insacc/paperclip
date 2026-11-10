@@ -20,7 +20,8 @@ export const ADAPTER_IDS = ["codex", "claude", "opencode"] as const;
 export type AdapterId = (typeof ADAPTER_IDS)[number];
 
 export const TRIGGER_IDS = ["time", "comment", "retry", "queued", "tool", "result", "approval", "paused", "stop"] as const;
-export type TriggerId = (typeof TRIGGER_IDS)[number];
+/** `provider` is not a `--triggers` choice: `--provider-fault-restart` schedules it (K1 after a provider fault applied). */
+export type TriggerId = (typeof TRIGGER_IDS)[number] | "provider";
 
 export const ENVIRONMENT_KINDS = ["local", "daytona"] as const;
 export type EnvironmentKind = (typeof ENVIRONMENT_KINDS)[number];
@@ -93,6 +94,9 @@ export interface WaveOptions {
   providerFaultDelaysMs?: number[];
   /** `--db-pressure <writers>`: harness-owned writers touching the wave's running run rows back to back (contention.ts). */
   dbPressure?: number;
+  /** `--provider-fault-restart K1`: each PV1/PV2 task also kills -9 the control plane after its fault applied. */
+  providerFaultRestart?: "K1";
+  providerFaultRestartAfterMs?: number;
 }
 
 export interface StormFault {
@@ -347,6 +351,8 @@ export interface TaskRecord {
   serverBuildAtLaunch?: "upgrade_from" | "current";
   /** Q1: the saved question and the board's answer. */
   question?: QuestionRecord;
+  /** PV with `--provider-fault-restart`: when the shim logged the task's fault (arms the `provider` trigger). */
+  providerFaultAppliedAt?: number;
 }
 
 export interface TaskGrade {

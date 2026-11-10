@@ -46,6 +46,8 @@ export const TRIGGER_DELAY_RANGE_MS: Record<Exclude<TriggerId, "time">, readonly
   approval: [0, 3_000],
   paused: [0, 3_000],
   stop: [0, 2_000],
+  // Not a `--triggers` choice: `--provider-fault-restart-after-seconds` sets its delay.
+  provider: [0, 0],
 };
 
 export function triggerFitsWorkload(trigger: TriggerId, workload: WorkloadId): boolean {
@@ -274,7 +276,10 @@ export function observedFaultSchedule(createdAt: number | null, faultIds: readon
 /** The faults a task schedules: its replayed sequence, or its one planned fault. */
 export function taskFaultSchedule(task: TaskPlan): ScheduledFault[] {
   if (task.replayFaults?.length) return task.replayFaults;
-  // A storm crosses K13 tasks; a provider fault (PV*) restarts nothing.
+  // A storm crosses K13 tasks; a provider fault (PV*) restarts nothing unless `--provider-fault-restart`
+  // asked for a K1 once the fault applied (the `provider` trigger).
+  const restart = task.providerFault?.restart;
+  if (restart) return [{ kind: restart.kind, holdMs: 0, atMs: 0, trigger: "provider", delayMs: restart.afterAppliedMs }];
   if (task.fault === "K13" || isProviderFault(task.fault)) return [];
   const planned: ScheduledFault = { kind: task.fault, holdMs: task.holdMs, atMs: task.fireAfterMs };
   const trigger = task.trigger ?? "time";
