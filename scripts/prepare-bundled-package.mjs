@@ -30,6 +30,16 @@ export function materializePublishManifest(pkg) {
   }
 
   delete publishManifest.publishConfig;
+  // The staged bundle is already built, and the release flow packs it with
+  // --ignore-scripts. A plain `npm pack` (git installs) would otherwise run the
+  // source tree's prepack/postpack hooks against the staged copy, where
+  // `../scripts/prepare-server-ui-dist.sh` does not exist.
+  if (publishManifest.scripts) {
+    const scripts = { ...publishManifest.scripts };
+    delete scripts.prepack;
+    delete scripts.postpack;
+    publishManifest.scripts = scripts;
+  }
   return publishManifest;
 }
 
