@@ -514,9 +514,16 @@ faithful stand-ins:
 - A real outage of a day would hold the slot for a day.
 - The relevant deadlines are fixed constants, not environment settings.
 
-**Aging.** One transaction updates every `timestamp` column of every table in the `public` schema by
-the same interval, so the database is exactly what it would be had everything happened the age
-earlier. Future deadlines move into the past. Triggers are turned off for the shift (replica role) so
+**Aging.** One transaction moves every time in the `public` schema back by the same interval, so the
+database is what it would be had everything happened the age earlier. Future deadlines move into the
+past. The shift covers:
+- every `timestamp` column;
+- every time inside a `jsonb` column: ISO datetime strings keep their format, and whole numbers in the
+  wave's epoch-millisecond window move too.
+
+The JSON pass matters. Receipts and snapshots keep copies of times (a continuation receipt stores the
+comment's `updatedAt` and compares it later). Shifting only the columns would fail those comparisons, a
+harness artifact rather than a product failure. Triggers are turned off for the shift (replica role) so
 they do not rewrite derived columns. For the time-bound tables (runs, native finalizations, controller
 instances, wakes, environment and workspace leases, workspace operations, approvals, decisions,
 interactions, resume claims, routine triggers and recovery actions), the identity, state and
@@ -550,8 +557,8 @@ when the board decides after a day, and the approved subtask must exist exactly 
 - Agent JWT expiry is not covered. Native runs mint a token per tool call, so a short
   `PAPERCLIP_AGENT_JWT_TTL_SECONDS` tests nothing there.
 - The fixed 1-hour runtime-tools token is not covered either.
-- Times kept outside Postgres are not aged: in-memory timers, the runner's own state files and
-  numeric milliseconds inside JSON columns.
+- Times kept outside Postgres are not aged: in-memory timers and the runner's own state files.
+  Neither are times inside `text` columns or HMACs computed over a time.
 
 ## Fault timing (`--triggers`)
 
