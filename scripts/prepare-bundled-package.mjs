@@ -383,9 +383,25 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
     throw new Error(`${sourcePackage.name} does not declare bundled dependencies`);
   }
 
+  // `pnpm pack` builds the static UI through the package's `prepack` hook. This
+  // bundled path copies the published files directly, so without this step a
+  // git install (`paperclipai install --ref`) fails on the missing `ui-dist`.
+  const files = sourcePackage.files ?? [];
+  if (
+    files.includes("ui-dist")
+    && sourcePackage.scripts?.["prepare:ui-dist"]
+    && !existsSync(resolve(sourceDir, "ui-dist"))
+  ) {
+    execFileSync("corepack", ["pnpm", "run", "prepare:ui-dist"], {
+      cwd: sourceDir,
+      stdio: "inherit",
+      env: { ...process.env, PAPERCLIP_RELEASE_REUSE_UI_DIST: process.env.PAPERCLIP_RELEASE_REUSE_UI_DIST ?? "1" },
+    });
+  }
+
   rmSync(destinationDir, { recursive: true, force: true });
   mkdirSync(destinationDir, { recursive: true });
-  for (const entry of sourcePackage.files ?? []) {
+  for (const entry of files) {
     cpSync(resolve(sourceDir, entry), resolve(destinationDir, entry), { recursive: true });
   }
   for (const entry of ["README.md", "LICENSE", "LICENSE.md"]) {
