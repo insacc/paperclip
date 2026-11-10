@@ -489,6 +489,70 @@ flag is `adapter_failed`, including three tasks that passed after a retry, which
 warning until `adapter_failed` names its cause. The audit saw only failure codes; the error-text
 part of U3 is checked only in waves run with this harness.
 
+## Time faults (TM1–TM3, `--time-age-hours`)
+
+```sh
+# Freeze, sleep and aged outage across running tasks.
+node cli/node_modules/tsx/dist/cli.mjs tests/restart-chaos/main.ts --env local \
+  --adapters codex --workloads A1,C1 --faults TM1,TM2,TM3 --concurrency 2 --tasks 3 --seed 301
+# The aged wait: an approval left pending for a day across a restart.
+node cli/node_modules/tsx/dist/cli.mjs tests/restart-chaos/main.ts --env local \
+  --adapters codex --workloads G1 --faults TM3 --triggers approval --concurrency 2 --tasks 2 --seed 302
+```
+
+The fourth fault family. Every other wave is minutes long on a fresh instance, so nothing time-bound
+expires. A time fault makes deadlines lapse during a run or across a restart. No product code changes.
+
+| Fault | What the harness does | Deadlines it crosses |
+| --- | --- | --- |
+| TM1 freeze | `SIGSTOP` the server process alone for 95–150 s, then `SIGCONT`. The runner, its provider and Postgres keep running. | Controller-instance lease (90 s), execution-control deadline (60 s), legacy run lease (60 s). The runner keeps calling a server that does not answer. |
+| TM2 sleep | `SIGSTOP` the server and every process under it for 20–45 s. While they are stopped, shift every database timestamp back by the age. Then `SIGCONT` the same processes. | Everything stored in the database: native and remote execution leases, scheduled retries, liveness and silence watchdogs, accounting closure, and pending waits. The processes' own monotonic timers barely moved. This stands in for a laptop that slept. |
+| TM3 aged outage | `SIGKILL` the server tree (as K1). While it is down, shift every database timestamp back by the age. Then start a replacement. | The same deadlines, reconciled by a fresh boot that finds runs, leases, wakes and waits that look hours old. |
+
+The age is 26 hours by default; `--time-age-hours` sets 1–72. The pause and the age are the cheapest
+faithful stand-ins:
+- A real outage of a day would hold the slot for a day.
+- The relevant deadlines are fixed constants, not environment settings.
+
+**Aging.** One transaction updates every `timestamp` column of every table in the `public` schema by
+the same interval, so the database is exactly what it would be had everything happened the age
+earlier. Future deadlines move into the past. Triggers are turned off for the shift (replica role) so
+they do not rewrite derived columns. For the time-bound tables (runs, native finalizations, controller
+instances, wakes, environment and workspace leases, workspace operations, approvals, decisions,
+interactions, resume claims, routine triggers and recovery actions), the identity, state and
+timestamp columns of each row are written before the shift to `<wave>/time-faults/<faultId>.json`.
+The per-table counts are in the fault receipt (`timeFault.aging` in `faults.json`) and in the
+timeline (`time_fault_aged`).
+
+If a frozen server's open transaction holds a lock the shift needs, the shift times out after 3 s.
+The tree then runs for 2 s, is frozen again, and the shift retries; `lockRetries` counts these. An
+age must exceed the wave's elapsed time, so shifted and unshifted values never overlap. A fault that
+would break this fails as a harness error.
+
+**Grading.** The product sees only the aged values. The observer and grader read through
+`TimeShiftedApi`, which adds the age back to every timestamp a shift moved. R4 overlaps, R5 evidence
+and speed budgets are therefore judged in real time; evidence bundles show those corrected times
+too. A freeze is a fault window like an outage, from `SIGSTOP` to ready. If a server exits on its
+own after `SIGCONT` (for example a lost-lease self-fence), the harness records
+`serverExitedAfterThaw`, starts a replacement and grades the tasks.
+
+**Pass rule.** Each task is graded on R1–R6 and its T-oracle as usual:
+- the task reaches its correct terminal state, or a diagnosable rest;
+- no run executed twice (R4);
+- nothing is stuck (R5, R6);
+- no Retry for something the system should recover by itself (R3).
+
+For the aged wait (G1 with `--triggers approval`), the approval must still be pending and accepted
+when the board decides after a day, and the approved subtask must exist exactly once.
+
+**Limits.**
+- Local only. On Daytona the remote runner is not under the server, so it cannot be frozen.
+- Agent JWT expiry is not covered. Native runs mint a token per tool call, so a short
+  `PAPERCLIP_AGENT_JWT_TTL_SECONDS` tests nothing there.
+- The fixed 1-hour runtime-tools token is not covered either.
+- Times kept outside Postgres are not aged: in-memory timers, the runner's own state files and
+  numeric milliseconds inside JSON columns.
+
 ## Fault timing (`--triggers`)
 
 Each task samples one trigger with its cell. `time` (default) fires at the
@@ -528,6 +592,7 @@ re-arms the task's own triggered faults instead of using their offsets.
 | `daytona-image.ts` | Docker-free extraction of the image's runnerd and provider pack, cached per digest, and the controller/image content-ID check. |
 | `provider-faults.ts`, `provider-shim/` | PV1–PV3: the resolve hook, the Codex stdio shim, per-task rules and the `provider_fault_applied` check. |
 | `question-handoff.ts` | Q1 saved question: the board's answer step and its oracle. |
+| `time-faults.ts`, `time-faults-config.ts` | TM1–TM3: process freezing, database aging with recorded rows, and the time-corrected API the grader reads through. |
 | `daytona-sweep.ts` | Daytona R6: read-only reconciliation of this wave's labelled sandboxes with leases; cleanup only through Paperclip. |
 
 ## Output (gitignored)
