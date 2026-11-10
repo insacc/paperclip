@@ -100,7 +100,7 @@ export interface TaskSidePanelProps {
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
-  onUpdate: (data: Record<string, unknown>) => void;
+  onUpdate: (data: Record<string, unknown>) => void | Promise<boolean>;
   inline?: boolean;
   mobile?: boolean;
   hasActiveRun?: boolean;
